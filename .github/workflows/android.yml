@@ -27,8 +27,38 @@ jobs:
       run: |
         echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > .env
 
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v2
+      with:
+        api-level: 33
+
+    - name: Create debug keystore (CI)
+      run: |
+        echo "Generating debug keystore at repository root"
+        # create at repository root so app/build.gradle.kts's rootDir/debug.keystore path resolves
+        mkdir -p "${{ github.workspace }}"
+        keytool -genkeypair -v \
+          -keystore "${{ github.workspace }}/debug.keystore" \
+          -storepass android \
+          -alias androiddebugkey \
+          -keypass android \
+          -dname "CN=Android Debug,O=Android,C=US" \
+          -keyalg RSA -keysize 2048 -validity 10000
+
+    - name: Ensure gradlew is executable
+      run: |
+        chmod +x ./gradlew || true
+
+    - name: Ensure Gradle runs headless (append JVM args)
+      run: |
+        # Append headless property so AWT-related tooling doesn't try to open UI
+        echo "org.gradle.jvmargs=${org.gradle.jvmargs:-}-Djava.awt.headless=true" >> gradle.properties
+
     - name: Build APK
-      run: gradle :app:assembleDebug
+      env:
+        # Extra safety for headless JVM
+        GRADLE_OPTS: -Djava.awt.headless=true
+      run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
