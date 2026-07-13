@@ -60,8 +60,32 @@ class AppViewModel(
     private val _familySavedBalancesState = MutableStateFlow<Map<Int, Double>>(emptyMap())
     val familySavedBalancesState: StateFlow<Map<Int, Double>> = _familySavedBalancesState.asStateFlow()
 
+    private val _familyCustomAmountsState = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val familyCustomAmountsState: StateFlow<Map<String, Double>> = _familyCustomAmountsState.asStateFlow()
+
     private val _reportedWeeksState = MutableStateFlow<Set<String>>(emptySet())
     val reportedWeeksState: StateFlow<Set<String>> = _reportedWeeksState.asStateFlow()
+
+    fun loadFamilyCustomAmounts() {
+        val keys = prefs.all.keys.filter { it.startsWith("family_custom_amount_") }
+        val map = mutableMapOf<String, Double>()
+        for (key in keys) {
+            val identifier = key.removePrefix("family_custom_amount_") // weekKey_familyId
+            val amount = prefs.getFloat(key, 0f).toDouble()
+            map[identifier] = amount
+        }
+        _familyCustomAmountsState.value = map
+    }
+
+    fun setFamilyCustomAmount(weekKey: String, familyId: Int, amount: Double?) {
+        val key = "family_custom_amount_${weekKey}_${familyId}"
+        if (amount == null) {
+            prefs.edit().remove(key).apply()
+        } else {
+            prefs.edit().putFloat(key, amount.toFloat()).apply()
+        }
+        loadFamilyCustomAmounts()
+    }
 
     fun loadReportedWeeks() {
         val keys = prefs.all.keys.filter { it.startsWith("week_reported_") }
@@ -138,7 +162,12 @@ class AppViewModel(
         sb.append("تقرير إحصائية توزيع الأسر للأسبوع المنتهي.\n\n")
         sb.append("إحصائيات الأسبوع:\n")
         sb.append("- صافي الربح للتوزيع: ${String.format(Locale.US, "%,.2f", summary.netRevenue)} SDG\n")
-        val totalFamiliesPayout = families.sumOf { it.portion }
+        
+        val totalFamiliesPayout = families.sumOf { family ->
+            val customKey = "family_custom_amount_${weekKey}_${family.id}"
+            val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
+            customVal ?: family.portion
+        }
         sb.append("- إجمالي أنصبة الأسر المحددة: ${String.format(Locale.US, "%,.2f", totalFamiliesPayout)} SDG\n\n")
         sb.append("حالة توزيع العائلات:\n")
         sb.append("-----------------------------\n")
@@ -146,21 +175,23 @@ class AppViewModel(
         val editor = prefs.edit()
         for (family in families) {
             val isPaid = paidIds.contains(family.id)
-            val familyShare = family.portion
+            val customKey = "family_custom_amount_${weekKey}_${family.id}"
+            val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
+            val familyShare = customVal ?: family.portion
             
-            if (family.portion <= 0) {
+            if (familyShare <= 0) {
                 sb.append("- ${family.name}: غير نشطة (0 جنيه)\n")
                 continue
             }
 
             if (isPaid) {
-                sb.append("- ${family.name} (المبلغ المحدد: ${String.format(Locale.US, "%,.0f", family.portion)} SDG): تم الاستلام\n")
+                sb.append("- ${family.name} (المبلغ المحدد: ${String.format(Locale.US, "%,.0f", familyShare)} SDG): تم الاستلام\n")
             } else {
                 val currentSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
                 val newSaved = currentSaved + familyShare
                 editor.putFloat("family_saved_balance_${family.id}", newSaved.toFloat())
                 
-                sb.append("- ${family.name} (المبلغ المحدد: ${String.format(Locale.US, "%,.0f", family.portion)} SDG): لم يتم الاستلام ❌ (تم حفظ وحجز نصيبها البالغ ${String.format(Locale.US, "%,.0f", familyShare)} SDG وتراكمه في حسابها)\n")
+                sb.append("- ${family.name} (المبلغ المحدد: ${String.format(Locale.US, "%,.0f", familyShare)} SDG): لم يتم الاستلام ❌ (تم حفظ وحجز نصيبها البالغ ${String.format(Locale.US, "%,.0f", familyShare)} SDG وتراكمه في حسابها)\n")
             }
         }
         
@@ -170,7 +201,10 @@ class AppViewModel(
         sb.append("\n-----------------------------\n")
         sb.append("الأرصدة المحفوظة الإجمالية للأسر بعد تحديث هذا الأسبوع:\n")
         for (family in families) {
-            if (family.portion > 0) {
+            val customKey = "family_custom_amount_${weekKey}_${family.id}"
+            val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
+            val familyShare = customVal ?: family.portion
+            if (familyShare > 0 || family.portion > 0) {
                 val totalSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
                 sb.append("- ${family.name}: رصيد محفوظ متراكم = ${String.format(Locale.US, "%,.0f", totalSaved)} SDG\n")
             }
@@ -426,6 +460,7 @@ class AppViewModel(
         loadFamilies()
         loadPaidFamilies()
         loadFamilySavedBalances()
+        loadFamilyCustomAmounts()
         loadReportedWeeks()
 
         // Automatically monitor weekly summaries to check and generate reports for completed weeks
@@ -479,10 +514,11 @@ class AppViewModel(
         amount: Double,
         date: Long,
         notes: String,
-        screenshotUri: Uri?
+        screenshotUris: List<Uri>
     ) {
         viewModelScope.launch {
-            val path = screenshotUri?.let { repository.copyScreenshotToInternalStorage(context, it) }
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
             repository.insertRickshawRevenue(
                 RickshawRevenue(
                     rickshawId = rickshawId,
@@ -533,10 +569,11 @@ class AppViewModel(
         amount: Double,
         date: Long,
         notes: String,
-        screenshotUri: Uri?
+        screenshotUris: List<Uri>
     ) {
         viewModelScope.launch {
-            val path = screenshotUri?.let { repository.copyScreenshotToInternalStorage(context, it) }
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
             val monthStr = SimpleDateFormat("yyyy-MM", Locale.US).format(Date(date))
             repository.insertShopRevenue(
                 ShopRevenue(
@@ -588,10 +625,11 @@ class AppViewModel(
         amount: Double,
         date: Long,
         notes: String,
-        screenshotUri: Uri?
+        screenshotUris: List<Uri>
     ) {
         viewModelScope.launch {
-            val path = screenshotUri?.let { repository.copyScreenshotToInternalStorage(context, it) }
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
             val monthStr = SimpleDateFormat("yyyy-MM", Locale.US).format(Date(date))
             repository.insertRoomRevenue(
                 RoomRevenue(
@@ -645,10 +683,11 @@ class AppViewModel(
         category: String,
         targetId: Int?,
         date: Long,
-        screenshotUri: Uri?
+        screenshotUris: List<Uri>
     ) {
         viewModelScope.launch {
-            val path = screenshotUri?.let { repository.copyScreenshotToInternalStorage(context, it) }
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
             repository.insertDeduction(
                 Deduction(
                     amount = amount,
@@ -707,10 +746,11 @@ class AppViewModel(
         title: String,
         content: String,
         date: Long,
-        screenshotUri: Uri?
+        screenshotUris: List<Uri>
     ) {
         viewModelScope.launch {
-            val path = screenshotUri?.let { repository.copyScreenshotToInternalStorage(context, it) }
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
             repository.insertReport(
                 Report(
                     title = title,
