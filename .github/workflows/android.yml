@@ -52,7 +52,7 @@ jobs:
     - name: Ensure Gradle runs headless (append JVM args)
       run: |
         # Append headless property so AWT-related tooling doesn't try to open UI
-        echo "org.gradle.jvmargs=${org.gradle.jvmargs:-}-Djava.awt.headless=true" >> gradle.properties
+        echo 'org.gradle.jvmargs=${org.gradle.jvmargs:-}-Djava.awt.headless=true' >> gradle.properties
 
     - name: Build APK
       env:
